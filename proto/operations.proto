@@ -1,0 +1,66 @@
+syntax = "proto3";
+
+package operations.v1;
+
+option go_package = "github.com/example/sync-vector-engine/internal/pb;pb";
+
+message VectorClockEntry {
+  string client_id = 1;
+  uint64 counter = 2;
+}
+
+message VectorClock {
+  repeated VectorClockEntry entries = 1;
+}
+
+message CursorPosition {
+  string document_id = 1;
+  uint32 line = 2;
+  uint32 column = 3;
+}
+
+message InsertOperation {
+  string document_id = 1;
+  string operation_id = 2;
+  string client_id = 3;
+  bytes payload = 4;
+  VectorClock clock = 5;
+}
+
+message DeleteOperation {
+  string document_id = 1;
+  string operation_id = 2;
+  string client_id = 3;
+  bytes payload = 4;
+  VectorClock clock = 5;
+}
+
+message CursorUpdate {
+  string client_id = 1;
+  CursorPosition position = 2;
+  uint64 sequence = 3;
+}
+
+message SnapshotMetadata {
+  string document_id = 1;
+  string snapshot_id = 2;
+  VectorClock clock = 3;
+  uint64 operation_count = 4;
+}
+
+message SnapshotPayload {
+  SnapshotMetadata metadata = 1;
+  bytes data = 2;
+}
+
+message OperationEnvelope {
+  string stream_id = 1;
+  uint64 sequence = 2;
+  int64 timestamp = 3;
+  oneof body {
+    InsertOperation insert = 10;
+    DeleteOperation delete = 11;
+    CursorUpdate cursor = 12;
+    SnapshotPayload snapshot = 13;
+  }
+}
