@@ -64,7 +64,5 @@ Struct CharacterNode {
 
 *The Constraint:* When User A and User B insert at the same spot simultaneously, your backend uses the `ID` comparison to deterministically decide who goes first, ensuring all users see the same result eventually.
 
-### 7\. Next Step for You
 
-Create the repository `entangle-core`. Your first commit should be a `README.md` containing the **Protocol Design**: defining exactly what the binary bytes look like when a client sends an "Insert 'A' at index 5" command.
 
