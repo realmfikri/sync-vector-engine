@@ -53,6 +53,7 @@ func (vc VectorClock) Compare(other VectorClock) bool {
 
 // WALRecord stores a durable representation of an operation.
 type WALRecord struct {
+	LSN         int64       `json:"lsn,omitempty"`
 	Operation   OperationID `json:"operation_id"`
 	Document    DocumentID  `json:"document_id"`
 	Client      ClientID    `json:"client_id"`
@@ -68,6 +69,7 @@ func (r WALRecord) MarshalBinary() ([]byte, error) {
 		r.CreatedAt = time.Now().UTC()
 	}
 	payload := struct {
+		LSN         int64       `json:"lsn,omitempty"`
 		Operation   OperationID `json:"operation_id"`
 		Document    DocumentID  `json:"document_id"`
 		Client      ClientID    `json:"client_id"`
@@ -75,6 +77,7 @@ func (r WALRecord) MarshalBinary() ([]byte, error) {
 		VectorClock VectorClock `json:"vector_clock"`
 		CreatedAt   time.Time   `json:"created_at"`
 	}{
+		LSN:         r.LSN,
 		Operation:   r.Operation,
 		Document:    r.Document,
 		Client:      r.Client,
@@ -88,6 +91,7 @@ func (r WALRecord) MarshalBinary() ([]byte, error) {
 // UnmarshalBinary deserializes a WALRecord from the JSON representation.
 func (r *WALRecord) UnmarshalBinary(data []byte) error {
 	var payload struct {
+		LSN         int64       `json:"lsn,omitempty"`
 		Operation   OperationID `json:"operation_id"`
 		Document    DocumentID  `json:"document_id"`
 		Client      ClientID    `json:"client_id"`
@@ -98,6 +102,7 @@ func (r *WALRecord) UnmarshalBinary(data []byte) error {
 	if err := json.Unmarshal(data, &payload); err != nil {
 		return fmt.Errorf("decode wal record: %w", err)
 	}
+	r.LSN = payload.LSN
 	r.Operation = payload.Operation
 	r.Document = payload.Document
 	r.Client = payload.Client
