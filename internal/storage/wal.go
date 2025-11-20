@@ -21,6 +21,17 @@ type WAL struct {
 	retryDelay time.Duration
 }
 
+// SnapshotRef identifies a persisted snapshot object and the WAL position it
+// represents.
+type SnapshotRef struct {
+	Document    types.DocumentID
+	OperationID types.OperationID
+	VectorClock types.VectorClock
+	ObjectPath  string
+	LastLSN     int64
+	CreatedAt   time.Time
+}
+
 // WALOption configures the WAL store.
 type WALOption func(*WAL)
 
@@ -128,7 +139,7 @@ func (w *WAL) ReplayDocument(ctx context.Context, docID types.DocumentID, fromLS
                 SELECT lsn, document_id, op_id, client_id, vector_clock, payload, created_at
                 FROM document_operations
                 WHERE document_id = $1 AND lsn > $2
-                ORDER BY op_id`, docID, fromLSN)
+                ORDER BY lsn`, docID, fromLSN)
 	if err != nil {
 		return err
 	}
@@ -196,6 +207,76 @@ func (w *WAL) RecordCheckpoint(ctx context.Context, docID types.DocumentID, lsn 
                 `, docID, lsn)
 		return err
 	})
+}
+
+// RecordSnapshot persists the metadata for a snapshot object so recovery can
+// locate it later.
+func (w *WAL) RecordSnapshot(ctx context.Context, ref SnapshotRef) error {
+	return w.retry(ctx, func(ctx context.Context) error {
+		vectorBytes, err := json.Marshal(ref.VectorClock)
+		if err != nil {
+			return fmt.Errorf("marshal vector clock: %w", err)
+		}
+
+		_, err = w.pool.Exec(ctx, `
+                        INSERT INTO document_snapshots (document_id, op_id, vector_clock, object_path, last_lsn)
+                        VALUES ($1, $2, $3, $4, $5)
+                `, ref.Document, ref.OperationID, vectorBytes, ref.ObjectPath, ref.LastLSN)
+		return err
+	})
+}
+
+// LatestSnapshot returns the newest snapshot reference for a document.
+func (w *WAL) LatestSnapshot(ctx context.Context, docID types.DocumentID) (SnapshotRef, error) {
+	var (
+		opID       string
+		vectorData []byte
+		objectPath string
+		lastLSN    int64
+		createdAt  time.Time
+	)
+
+	err := w.pool.QueryRow(ctx, `
+                SELECT op_id, vector_clock, object_path, last_lsn, created_at
+                FROM document_snapshots
+                WHERE document_id = $1
+                ORDER BY created_at DESC
+                LIMIT 1
+        `, docID).Scan(&opID, &vectorData, &objectPath, &lastLSN, &createdAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return SnapshotRef{}, nil
+	}
+	if err != nil {
+		return SnapshotRef{}, err
+	}
+
+	var clock types.VectorClock
+	if len(vectorData) > 0 {
+		if err := json.Unmarshal(vectorData, &clock); err != nil {
+			return SnapshotRef{}, fmt.Errorf("decode vector clock: %w", err)
+		}
+	}
+
+	return SnapshotRef{
+		Document:    docID,
+		OperationID: types.OperationID(opID),
+		VectorClock: clock,
+		ObjectPath:  objectPath,
+		LastLSN:     lastLSN,
+		CreatedAt:   createdAt,
+	}, nil
+}
+
+// OperationCountAfterLSN returns how many operations exist beyond the provided
+// WAL position for a document.
+func (w *WAL) OperationCountAfterLSN(ctx context.Context, docID types.DocumentID, lsn int64) (int64, error) {
+	var count int64
+	err := w.pool.QueryRow(ctx, `
+                SELECT COUNT(*)
+                FROM document_operations
+                WHERE document_id = $1 AND lsn > $2
+        `, docID, lsn).Scan(&count)
+	return count, err
 }
 
 func (w *WAL) retry(ctx context.Context, fn func(context.Context) error) error {
