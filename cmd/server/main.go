@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/http"
 	"os/signal"
 	"syscall"
 	"time"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/example/sync-vector-engine/internal/config"
 	"github.com/example/sync-vector-engine/internal/crdt"
+	"github.com/example/sync-vector-engine/internal/playback"
 	"github.com/example/sync-vector-engine/internal/snapshot"
 	"github.com/example/sync-vector-engine/internal/storage"
 	"github.com/example/sync-vector-engine/internal/types"
@@ -49,6 +51,17 @@ func main() {
 	go checkpointLoop(ctx, wal, engine, logger, cfg.HealthcheckProbe)
 	snapshotWorker.Start(ctx)
 
+	playbackSvc := playback.NewService(wal, cfg.ObjectBucket, playback.NewObjectLoader(resources.Object), logger, playback.ServiceConfig{})
+	playbackHandler := playback.NewHTTPHandler(playbackSvc, logger)
+	httpServer := &http.Server{Addr: cfg.HTTPListenAddr, Handler: playbackHandler}
+
+	go func() {
+		logger.Info().Str("addr", cfg.HTTPListenAddr).Msg("http server starting")
+		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			logger.Error().Err(err).Msg("http server failed")
+		}
+	}()
+
 	logger.Info().Msg("server dependencies initialized")
 
 	go func() {
@@ -78,6 +91,13 @@ func main() {
 	go func() {
 		resources.Close()
 		close(done)
+	}()
+
+	go func() {
+		<-ctx.Done()
+		ctx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
+		defer cancel()
+		_ = httpServer.Shutdown(ctx)
 	}()
 
 	select {

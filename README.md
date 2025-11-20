@@ -28,6 +28,19 @@ A high-throughput, conflict-free synchronization engine capable of managing the 
   * **Snapshotting:** The system monitors the operation log. When the log for a document exceeds $N$ entries, a background worker compiles the current state into a static snapshot and clears the RAM, storing the snapshot in object storage (simulated S3/MinIO).
   * **Playback API:** An endpoint that allows a client to request the document state *at a specific point in time* (e.g., "Show me the code as it looked at 10:45 AM").
 
+#### Playback API Contract
+
+The playback endpoint exposes deterministic document state reconstruction over HTTP:
+
+```
+GET /documents/{document_id}/state?at_op={operation_id}&at_time={rfc3339_timestamp}
+```
+
+* `at_op` (optional): Requests the state immediately after the given operation identifier.
+* `at_time` (optional): Requests the state at or before the provided RFC3339 timestamp. At least one of `at_op` or `at_time` is required.
+* Responses include the serialized buffer (`buffer`), last operation identifier, resolved WAL LSN, and merged vector clock used for playback.
+* Requests are authorized before replay, seeded from the newest snapshot at or before the target LSN, and replay WAL entries until the requested point. Recent playback states are cached to accelerate repeated queries.
+
 ### 4\. Non-Functional Requirements (Constraints)
 
   * **Latency Budget:** The "Time to First Byte" for a broadcast message (User A types -\> Server -\> User B receives) must be **\< 50ms** within the same region.

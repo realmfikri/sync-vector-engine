@@ -73,7 +73,11 @@ func (e *Engine) ApplyWAL(record types.WALRecord) error {
 
 	switch evt.Type {
 	case EventInsert:
-		store.ApplyInsert(evt.Node.OriginLeft, evt.Node.OriginRight, evt.Node.Content)
+		if evt.Node.ID.SiteID != "" {
+			store.InsertNode(evt.Node)
+		} else {
+			store.ApplyInsert(evt.Node.OriginLeft, evt.Node.OriginRight, evt.Node.Content)
+		}
 	case EventDelete:
 		store.ApplyDelete(evt.Node.ID)
 	}

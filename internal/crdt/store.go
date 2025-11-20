@@ -88,6 +88,30 @@ func (s *CRDTStore) ApplyInsert(originLeft, originRight Identifier, content stri
 	return node
 }
 
+// InsertNode places a fully constructed node into the CRDT without generating
+// a new identifier. This is primarily used during WAL replay where the
+// identifier has already been established.
+func (s *CRDTStore) InsertNode(node CharacterNode) CharacterNode {
+	s.mu.Lock()
+
+	idx := sort.Search(len(s.nodes), func(i int) bool {
+		return s.nodes[i].ID.Compare(node.ID) >= 0
+	})
+
+	if idx < len(s.nodes) && s.nodes[idx].ID.Equals(node.ID) {
+		*s.nodes[idx] = node
+	} else {
+		s.nodes = append(s.nodes, nil)
+		copy(s.nodes[idx+1:], s.nodes[idx:])
+		s.nodes[idx] = &node
+	}
+
+	s.mu.Unlock()
+
+	s.emit(Event{Type: EventInsert, Node: node})
+	return node
+}
+
 // ApplyDelete marks the node with the provided identifier as deleted, retaining
 // the tombstone for ordering and playback.
 func (s *CRDTStore) ApplyDelete(id Identifier) (CharacterNode, bool) {
