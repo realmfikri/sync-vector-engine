@@ -78,3 +78,32 @@ func (r *ConnectionRegistry) BroadcastEnvelope(documentID string, env proto.Mess
 	}
 	return r.BroadcastBinary(documentID, data, skip)
 }
+
+// BroadcastBinaryByClientID delivers the payload to every connection for the
+// document, skipping a matching client identifier when provided. This is
+// useful when relaying events received over pub/sub where the originating
+// connection is not known locally.
+func (r *ConnectionRegistry) BroadcastBinaryByClientID(documentID string, payload []byte, skipClientID string) int {
+	r.mu.RLock()
+	conns := r.documents[documentID]
+	if len(conns) == 0 {
+		r.mu.RUnlock()
+		return 0
+	}
+	recipients := make([]*Connection, 0, len(conns))
+	for c := range conns {
+		if skipClientID != "" && c.ClientID() == skipClientID {
+			continue
+		}
+		recipients = append(recipients, c)
+	}
+	r.mu.RUnlock()
+
+	sent := 0
+	for _, conn := range recipients {
+		if err := conn.SendBinary(payload); err == nil {
+			sent++
+		}
+	}
+	return sent
+}

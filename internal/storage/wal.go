@@ -9,7 +9,6 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/example/sync-vector-engine/internal/types"
@@ -74,10 +73,10 @@ func (w *WAL) AppendOperation(ctx context.Context, docID types.DocumentID, op ty
 		}
 
 		row := tx.QueryRow(ctx, `
-                        INSERT INTO document_operations (document_id, op_id, client_id, vector_clock, payload, created_at)
-                        VALUES ($1, $2, $3, $4, $5, $6)
-                        RETURNING lsn`,
-			op.Document, op.Operation, op.Client, pgtype.JSONB{Bytes: vectorBytes, Valid: true}, op.Payload, op.CreatedAt,
+INSERT INTO document_operations (document_id, op_id, client_id, vector_clock, payload, created_at)
+VALUES ($1, $2, $3, $4, $5, $6)
+RETURNING lsn`,
+			op.Document, op.Operation, op.Client, vectorBytes, op.Payload, op.CreatedAt,
 		)
 		if err := row.Scan(&lsn); err != nil {
 			return err
@@ -134,7 +133,7 @@ func (w *WAL) ReplayDocument(ctx context.Context, docID types.DocumentID, fromLS
 			documentID  string
 			opID        string
 			clientID    string
-			vectorClock pgtype.JSONB
+			vectorClock []byte
 			payload     []byte
 			createdAt   time.Time
 		)
@@ -143,8 +142,8 @@ func (w *WAL) ReplayDocument(ctx context.Context, docID types.DocumentID, fromLS
 		}
 
 		var clock types.VectorClock
-		if len(vectorClock.Bytes) > 0 {
-			if err := json.Unmarshal(vectorClock.Bytes, &clock); err != nil {
+		if len(vectorClock) > 0 {
+			if err := json.Unmarshal(vectorClock, &clock); err != nil {
 				return fmt.Errorf("decode vector clock: %w", err)
 			}
 		}
@@ -226,5 +225,6 @@ func isTransient(err error) bool {
 		}
 	}
 
-	return errors.Is(err, pgconn.ErrTLSConfig) || errors.Is(err, pgconn.ErrCopyDone)
+	var connectErr *pgconn.ConnectError
+	return errors.As(err, &connectErr)
 }
