@@ -91,6 +91,9 @@ func (c *Connection) DocumentID() string { return c.document }
 // ClientID returns the authenticated client identifier.
 func (c *Connection) ClientID() string { return c.identity.ClientID }
 
+// Metadata exposes the caller-supplied client metadata, if any.
+func (c *Connection) Metadata() map[string]string { return c.identity.Metadata }
+
 // Context exposes the lifecycle context for hooks.
 func (c *Connection) Context() context.Context { return c.ctx }
 
@@ -199,9 +202,26 @@ func (c *Connection) handleBinary(payload []byte, hooks Hooks) error {
 		return fmt.Errorf("decode protobuf: %w", err)
 	}
 
+	if presence := envelope.GetPresence(); presence != nil {
+		if hooks.OnPresence != nil {
+			if err := hooks.OnPresence(c.ctx, c, presence, &envelope); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
 	if cursor := envelope.GetCursor(); cursor != nil {
 		if hooks.OnPresence != nil {
-			if err := hooks.OnPresence(c.ctx, c, cursor, &envelope); err != nil {
+			update := &operationsv1.PresenceUpdate{
+				DocumentId: c.document,
+				ClientId:   cursor.ClientId,
+			}
+			if pos := cursor.GetPosition(); pos != nil {
+				update.Line = pos.Line
+				update.Column = pos.Column
+			}
+			if err := hooks.OnPresence(c.ctx, c, update, &envelope); err != nil {
 				return err
 			}
 		}
@@ -281,12 +301,16 @@ func (c *Connection) enqueueControl(opcode byte, payload []byte) error {
 }
 
 type Hooks struct {
-	OnOperation OperationHook
-	OnPresence  PresenceHook
+	OnOperation  OperationHook
+	OnPresence   PresenceHook
+	OnConnect    ConnectHook
+	OnDisconnect DisconnectHook
 }
 
 type OperationHook func(ctx context.Context, conn *Connection, envelope *operationsv1.OperationEnvelope) error
-type PresenceHook func(ctx context.Context, conn *Connection, update *operationsv1.CursorUpdate, envelope *operationsv1.OperationEnvelope) error
+type PresenceHook func(ctx context.Context, conn *Connection, update *operationsv1.PresenceUpdate, envelope *operationsv1.OperationEnvelope) error
+type ConnectHook func(ctx context.Context, conn *Connection) error
+type DisconnectHook func(conn *Connection)
 
 type ClientIdentity struct {
 	ClientID   string

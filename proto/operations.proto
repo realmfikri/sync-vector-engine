@@ -41,6 +41,15 @@ message CursorUpdate {
   uint64 sequence = 3;
 }
 
+message PresenceUpdate {
+  string document_id = 1;
+  string client_id = 2;
+  uint32 line = 3;
+  uint32 column = 4;
+  map<string, string> metadata = 5;
+  bool disconnected = 6;
+}
+
 message SnapshotMetadata {
   string document_id = 1;
   string snapshot_id = 2;
@@ -62,5 +71,6 @@ message OperationEnvelope {
     DeleteOperation delete = 11;
     CursorUpdate cursor = 12;
     SnapshotPayload snapshot = 13;
+    PresenceUpdate presence = 14;
   }
 }

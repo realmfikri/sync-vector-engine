@@ -156,9 +156,18 @@ func (g *Gateway) performUpgrade(w http.ResponseWriter, r *http.Request, identit
 		writeTimeout:       g.cfg.WriteTimeout,
 	}, func() {
 		g.registry.Unregister(documentID, connection)
+		if g.hooks.OnDisconnect != nil {
+			g.hooks.OnDisconnect(connection)
+		}
 	})
 
 	g.registry.Register(documentID, connection)
+	if g.hooks.OnConnect != nil {
+		if err := g.hooks.OnConnect(connection.Context(), connection); err != nil {
+			connection.Close()
+			return err
+		}
+	}
 	childLogger.Info().Msg("websocket connection established")
 
 	go connection.Run(g.hooks)
