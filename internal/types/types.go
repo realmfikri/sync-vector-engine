@@ -20,6 +20,9 @@ type VectorClock map[ClientID]uint64
 
 // Bump increments the vector clock for a client.
 func (vc VectorClock) Bump(client ClientID) {
+	if vc == nil {
+		return
+	}
 	vc[client] = vc[client] + 1
 }
 
@@ -31,6 +34,26 @@ func (vc VectorClock) Merge(other VectorClock) {
 			vc[client] = value
 		}
 	}
+}
+
+// Dominates returns true when the receiver has seen at least as many updates as
+// the provided vector clock for all participants.
+func (vc VectorClock) Dominates(other VectorClock) bool {
+	for client, value := range other {
+		if vc[client] < value {
+			return false
+		}
+	}
+	return true
+}
+
+// Clone returns a deep copy of the vector clock.
+func (vc VectorClock) Clone() VectorClock {
+	copy := make(VectorClock, len(vc))
+	for client, value := range vc {
+		copy[client] = value
+	}
+	return copy
 }
 
 // Compare returns true if the receiver dominates the other clock (all entries
@@ -60,6 +83,44 @@ type WALRecord struct {
 	Payload     []byte      `json:"payload"`
 	VectorClock VectorClock `json:"vector_clock"`
 	CreatedAt   time.Time   `json:"created_at"`
+}
+
+// Operation represents a CRDT mutation with causality metadata.
+type Operation struct {
+	ID          OperationID `json:"operation_id"`
+	Document    DocumentID  `json:"document_id"`
+	Client      ClientID    `json:"client_id"`
+	Payload     []byte      `json:"payload"`
+	VectorClock VectorClock `json:"vector_clock"`
+	CreatedAt   time.Time   `json:"created_at"`
+}
+
+// ToWALRecord converts the operation to a WALRecord for persistence.
+func (op Operation) ToWALRecord() WALRecord {
+	clock := op.VectorClock
+	if clock == nil {
+		clock = make(VectorClock)
+	}
+	return WALRecord{
+		Operation:   op.ID,
+		Document:    op.Document,
+		Client:      op.Client,
+		Payload:     op.Payload,
+		VectorClock: clock.Clone(),
+		CreatedAt:   op.CreatedAt,
+	}
+}
+
+// OperationFromWAL constructs an Operation from a WAL record.
+func OperationFromWAL(record WALRecord) Operation {
+	return Operation{
+		ID:          record.Operation,
+		Document:    record.Document,
+		Client:      record.Client,
+		Payload:     record.Payload,
+		VectorClock: record.VectorClock.Clone(),
+		CreatedAt:   record.CreatedAt,
+	}
 }
 
 // MarshalBinary serializes a WALRecord to JSON for storage in a byte-oriented
