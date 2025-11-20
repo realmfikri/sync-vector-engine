@@ -26,6 +26,7 @@ func (r *ConnectionRegistry) Register(documentID string, c *Connection) {
 		r.documents[documentID] = make(map[*Connection]struct{})
 	}
 	r.documents[documentID][c] = struct{}{}
+	gatewayConnections.WithLabelValues(documentID).Set(float64(len(r.documents[documentID])))
 }
 
 // Unregister removes the connection.
@@ -40,6 +41,7 @@ func (r *ConnectionRegistry) Unregister(documentID string, c *Connection) {
 	if len(conns) == 0 {
 		delete(r.documents, documentID)
 	}
+	gatewayConnections.WithLabelValues(documentID).Set(float64(len(conns)))
 }
 
 // BroadcastBinary delivers the payload to every connection currently attached

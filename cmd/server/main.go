@@ -15,6 +15,7 @@ import (
 
 	"github.com/example/sync-vector-engine/internal/config"
 	"github.com/example/sync-vector-engine/internal/crdt"
+	"github.com/example/sync-vector-engine/internal/observability"
 	"github.com/example/sync-vector-engine/internal/playback"
 	"github.com/example/sync-vector-engine/internal/snapshot"
 	"github.com/example/sync-vector-engine/internal/storage"
@@ -30,9 +31,20 @@ func main() {
 	}
 
 	logger := log.With().Str("app", cfg.AppName).Logger()
+	observability.RegisterRuntimeCollectors()
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	telemetryShutdown, err := observability.Start(ctx, observability.Config{
+		ServiceName:  cfg.AppName,
+		MetricsAddr:  cfg.MetricsAddr,
+		OTLPEndpoint: cfg.OTLPEndpoint,
+	}, logger)
+	if err != nil {
+		logger.Fatal().Err(err).Msg("failed to initialize telemetry")
+	}
+	defer telemetryShutdown(context.Background())
 
 	resources, err := config.NewResources(ctx, cfg)
 	if err != nil {
@@ -196,6 +208,10 @@ func checkpointLoop(ctx context.Context, wal *storage.WAL, engine *crdt.Engine, 
 				}
 				if err := wal.RecordCheckpoint(ctx, docID, lsn); err != nil {
 					logger.Error().Err(err).Str("document", string(docID)).Msg("failed to persist checkpoint")
+					continue
+				}
+				if backlog, err := wal.OperationCountAfterLSN(ctx, docID, lsn); err == nil {
+					wal.RecordBacklogMetric(docID, backlog)
 				}
 			}
 		case <-ctx.Done():

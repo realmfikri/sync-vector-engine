@@ -3,6 +3,7 @@ package crdt
 import (
 	"encoding/json"
 	"sync"
+	"time"
 
 	"github.com/rs/zerolog"
 
@@ -44,11 +45,13 @@ func (e *Engine) Store(docID types.DocumentID) *CRDTStore {
 
 	store = NewCRDTStore(e.siteID)
 	e.stores[docID] = store
+	documentCount.Set(float64(len(e.stores)))
 	return store
 }
 
 // ApplyWAL replays a WAL record into the CRDT store and merges vector clocks.
 func (e *Engine) ApplyWAL(record types.WALRecord) error {
+	start := time.Now()
 	store := e.Store(record.Document)
 	e.mu.Lock()
 	clock := e.clocks[record.Document]
@@ -82,6 +85,7 @@ func (e *Engine) ApplyWAL(record types.WALRecord) error {
 		store.ApplyDelete(evt.Node.ID)
 	}
 
+	applyLatency.WithLabelValues(string(record.Document)).Observe(time.Since(start).Seconds())
 	return nil
 }
 

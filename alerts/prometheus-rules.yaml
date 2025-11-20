@@ -1,0 +1,38 @@
+groups:
+  - name: sync-vector-engine-latency
+    rules:
+      - alert: GatewayLatencyHigh
+        expr: gateway_upgrade_seconds_bucket{le="0.05"} == 0
+        for: 2m
+        labels:
+          severity: page
+        annotations:
+          summary: "WebSocket upgrades exceeding latency budget"
+          description: "No upgrades completed under 50ms for {{ $labels.document }}"
+
+      - alert: BroadcastLatencyDegraded
+        expr: histogram_quantile(0.95, sum(rate(broadcast_enqueue_to_send_seconds_bucket[5m])) by (le)) > 0.05
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "Broadcast fanout exceeds 50ms P95"
+          description: "Redis broadcast pipeline is above threshold"
+
+      - alert: WalBacklogGrowing
+        expr: wal_backlog_entries > 1000
+        for: 10m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "WAL backlog exceeds 1000 operations"
+          description: "Document {{ $labels.document }} is not checkpointing fast enough"
+
+      - alert: ConnectionsDropping
+        expr: increase(gateway_connections[5m]) < -10
+        for: 5m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "Rapid drop in active WebSocket connections"
+          description: "Investigate potential upstream outage or auth failures"

@@ -10,6 +10,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/example/sync-vector-engine/internal/types"
 )
@@ -70,6 +72,11 @@ func (w *WAL) AppendOperation(ctx context.Context, docID types.DocumentID, op ty
 		op.CreatedAt = time.Now().UTC()
 	}
 
+	ctx, span := walTracer.Start(ctx, "wal.append_operation", trace.WithAttributes(attribute.String("document", string(docID))))
+	defer span.End()
+
+	start := time.Now()
+
 	var lsn int64
 	err := w.retry(ctx, func(ctx context.Context) error {
 		tx, err := w.pool.BeginTx(ctx, pgx.TxOptions{})
@@ -104,6 +111,8 @@ RETURNING lsn`,
 		return 0, err
 	}
 
+	walAppendLatency.WithLabelValues(string(docID)).Observe(time.Since(start).Seconds())
+
 	return lsn, nil
 }
 
@@ -135,6 +144,10 @@ func (w *WAL) ActiveDocuments(ctx context.Context) ([]types.DocumentID, error) {
 
 // ReplayDocument scans operations for a document ordered by op_id, invoking the handler for each record.
 func (w *WAL) ReplayDocument(ctx context.Context, docID types.DocumentID, fromLSN int64, handler func(types.WALRecord) error) error {
+	ctx, span := walTracer.Start(ctx, "wal.replay_document", trace.WithAttributes(attribute.String("document", string(docID))))
+	defer span.End()
+
+	start := time.Now()
 	rows, err := w.pool.Query(ctx, `
                 SELECT lsn, document_id, op_id, client_id, vector_clock, payload, created_at
                 FROM document_operations
@@ -181,6 +194,7 @@ func (w *WAL) ReplayDocument(ctx context.Context, docID types.DocumentID, fromLS
 		}
 	}
 
+	walReplayLatency.WithLabelValues(string(docID)).Observe(time.Since(start).Seconds())
 	return rows.Err()
 }
 
@@ -318,6 +332,11 @@ func (w *WAL) OperationCountAfterLSN(ctx context.Context, docID types.DocumentID
                 WHERE document_id = $1 AND lsn > $2
         `, docID, lsn).Scan(&count)
 	return count, err
+}
+
+// RecordBacklogMetric updates the backlog gauge for the provided document.
+func (w *WAL) RecordBacklogMetric(docID types.DocumentID, backlog int64) {
+	walBacklog.WithLabelValues(string(docID)).Set(float64(backlog))
 }
 
 // LSNForOperation returns the WAL position for a specific operation identifier.
