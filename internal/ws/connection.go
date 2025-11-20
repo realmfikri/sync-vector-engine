@@ -9,7 +9,10 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/example/sync-vector-engine/internal/observability"
 	"github.com/rs/zerolog"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	proto "google.golang.org/protobuf/proto"
 
 	operationsv1 "github.com/example/sync-vector-engine/internal/pb/proto"
@@ -66,8 +69,8 @@ type outboundMessage struct {
 	payload []byte
 }
 
-func newConnection(netConn net.Conn, id ClientIdentity, documentID string, registry *ConnectionRegistry, logger zerolog.Logger, opts connectionOptions, onClose func()) *Connection {
-	ctx, cancel := context.WithCancel(context.Background())
+func newConnection(ctx context.Context, netConn net.Conn, id ClientIdentity, documentID string, registry *ConnectionRegistry, logger zerolog.Logger, opts connectionOptions, onClose func()) *Connection {
+	ctx, cancel := context.WithCancel(ctx)
 	c := &Connection{
 		conn:     netConn,
 		identity: id,
@@ -117,6 +120,7 @@ func (c *Connection) SendBinary(payload []byte) error {
 	msg := outboundMessage{opcode: opcodeBinary, payload: payload}
 	select {
 	case c.send <- msg:
+		gatewaySendQueueDepth.WithLabelValues(c.document).Set(float64(len(c.send)))
 		return nil
 	case <-c.ctx.Done():
 		return c.ctx.Err()
@@ -202,9 +206,31 @@ func (c *Connection) handleBinary(payload []byte, hooks Hooks) error {
 		return fmt.Errorf("decode protobuf: %w", err)
 	}
 
+	envType := "unknown"
+	switch envelope.Body.(type) {
+	case *operationsv1.OperationEnvelope_Insert:
+		envType = "insert"
+	case *operationsv1.OperationEnvelope_Delete:
+		envType = "delete"
+	case *operationsv1.OperationEnvelope_Cursor:
+		envType = "cursor"
+	case *operationsv1.OperationEnvelope_Snapshot:
+		envType = "snapshot"
+	case *operationsv1.OperationEnvelope_Presence:
+		envType = "presence"
+	}
+
+	ctx, span := tracer.Start(c.ctx, "gateway.handle_binary", trace.WithAttributes(
+		attribute.String("document", c.document),
+		attribute.String("client", c.identity.ClientID),
+		attribute.String("envelope_type", envType),
+	))
+	defer span.End()
+	log := observability.LoggerWithTrace(ctx, c.logger)
+
 	if presence := envelope.GetPresence(); presence != nil {
 		if hooks.OnPresence != nil {
-			if err := hooks.OnPresence(c.ctx, c, presence, &envelope); err != nil {
+			if err := hooks.OnPresence(ctx, c, presence, &envelope); err != nil {
 				return err
 			}
 		}
@@ -221,7 +247,7 @@ func (c *Connection) handleBinary(payload []byte, hooks Hooks) error {
 				update.Line = pos.Line
 				update.Column = pos.Column
 			}
-			if err := hooks.OnPresence(c.ctx, c, update, &envelope); err != nil {
+			if err := hooks.OnPresence(ctx, c, update, &envelope); err != nil {
 				return err
 			}
 		}
@@ -229,10 +255,11 @@ func (c *Connection) handleBinary(payload []byte, hooks Hooks) error {
 	}
 
 	if hooks.OnOperation != nil {
-		if err := hooks.OnOperation(c.ctx, c, &envelope); err != nil {
+		if err := hooks.OnOperation(ctx, c, &envelope); err != nil {
 			return err
 		}
 	}
+	log.Debug().Str("type", envType).Msg("operation envelope processed")
 	return nil
 }
 

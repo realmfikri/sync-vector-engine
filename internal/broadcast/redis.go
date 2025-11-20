@@ -11,6 +11,9 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/redis/go-redis/v9"
 	"github.com/rs/zerolog"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	proto "google.golang.org/protobuf/proto"
 
 	operationsv1 "github.com/example/sync-vector-engine/internal/pb/proto"
@@ -45,8 +48,12 @@ type RedisBroadcaster struct {
 	seenMu sync.Mutex
 	seen   map[string]time.Time
 
-	latency *prometheus.HistogramVec
+	latency       *prometheus.HistogramVec
+	queueDepth    *prometheus.GaugeVec
+	subscriptions prometheus.Gauge
 }
+
+var broadcastTracer = otel.Tracer("github.com/example/sync-vector-engine/broadcast")
 
 // NewRedisBroadcaster constructs a broadcaster backed by Redis Pub/Sub.
 func NewRedisBroadcaster(client *redis.Client, registry *ws.ConnectionRegistry, logger zerolog.Logger) *RedisBroadcaster {
@@ -57,20 +64,36 @@ func NewRedisBroadcaster(client *redis.Client, registry *ws.ConnectionRegistry, 
 		Buckets:   prometheus.LinearBuckets(0.005, 0.005, 12),
 	}, []string{"document_id"})
 
+	queueDepth := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: "broadcast",
+		Name:      "pubsub_queue_depth",
+		Help:      "Buffered messages waiting in the Redis Pub/Sub channel.",
+	}, []string{"topic"})
+
+	subs := prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "broadcast",
+		Name:      "subscriptions",
+		Help:      "Active Redis Pub/Sub subscriptions.",
+	})
+
 	if err := prometheus.Register(histogram); err != nil {
 		if regErr, ok := err.(prometheus.AlreadyRegisteredError); ok {
 			histogram = regErr.ExistingCollector.(*prometheus.HistogramVec)
 		}
 	}
+	_ = prometheus.Register(queueDepth)
+	_ = prometheus.Register(subs)
 
 	return &RedisBroadcaster{
-		client:      client,
-		registry:    registry,
-		logger:      logger,
-		topicPrefix: defaultTopicPrefix,
-		dedupeTTL:   defaultDedupeTTL,
-		seen:        make(map[string]time.Time),
-		latency:     histogram,
+		client:        client,
+		registry:      registry,
+		logger:        logger,
+		topicPrefix:   defaultTopicPrefix,
+		dedupeTTL:     defaultDedupeTTL,
+		seen:          make(map[string]time.Time),
+		latency:       histogram,
+		queueDepth:    queueDepth,
+		subscriptions: subs,
 	}
 }
 
@@ -147,6 +170,8 @@ func (b *RedisBroadcaster) run(ctx context.Context) {
 
 func (b *RedisBroadcaster) consume(ctx context.Context, pubsub *redis.PubSub) error {
 	defer pubsub.Close()
+	b.subscriptions.Inc()
+	defer b.subscriptions.Dec()
 
 	ch := pubsub.Channel(redis.WithChannelSize(256))
 	for {
@@ -154,17 +179,18 @@ func (b *RedisBroadcaster) consume(ctx context.Context, pubsub *redis.PubSub) er
 		case <-ctx.Done():
 			return ctx.Err()
 		case msg, ok := <-ch:
+			b.queueDepth.WithLabelValues(msg.Channel).Set(float64(len(ch)))
 			if !ok {
 				return errors.New("pubsub channel closed")
 			}
-			if err := b.process(msg); err != nil {
+			if err := b.process(ctx, msg); err != nil {
 				b.logger.Warn().Err(err).Msg("failed to process broadcast message")
 			}
 		}
 	}
 }
 
-func (b *RedisBroadcaster) process(msg *redis.Message) error {
+func (b *RedisBroadcaster) process(ctx context.Context, msg *redis.Message) error {
 	var payload redisMessage
 	if err := json.Unmarshal([]byte(msg.Payload), &payload); err != nil {
 		return fmt.Errorf("decode payload: %w", err)
@@ -172,6 +198,12 @@ func (b *RedisBroadcaster) process(msg *redis.Message) error {
 	if payload.DocumentID == "" || payload.OperationID == "" {
 		return errors.New("incomplete payload")
 	}
+
+	ctx, span := broadcastTracer.Start(ctx, "broadcast.process", trace.WithAttributes(
+		attribute.String("document", payload.DocumentID),
+		attribute.String("operation", payload.OperationID),
+	))
+	defer span.End()
 
 	if b.isDuplicate(payload.DocumentID, payload.OperationID) {
 		return nil

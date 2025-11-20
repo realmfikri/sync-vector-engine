@@ -9,7 +9,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/example/sync-vector-engine/internal/observability"
 	"github.com/rs/zerolog"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 const (
@@ -97,12 +100,21 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	start := time.Now()
 	if err := g.performUpgrade(w, r, identity, documentID); err != nil {
 		g.logger.Error().Err(err).Msg("websocket upgrade failed")
+	} else {
+		gatewayUpgradeLatency.WithLabelValues(documentID).Observe(time.Since(start).Seconds())
 	}
 }
 
 func (g *Gateway) performUpgrade(w http.ResponseWriter, r *http.Request, identity ClientIdentity, documentID string) error {
+	ctx, span := tracer.Start(r.Context(), "gateway.upgrade", trace.WithAttributes(
+		attribute.String("document", documentID),
+		attribute.String("client", identity.ClientID),
+	))
+	defer span.End()
+
 	if !headerContainsToken(r.Header.Get("Connection"), "Upgrade") || !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
 		http.Error(w, "upgrade headers required", http.StatusBadRequest)
 		return errors.New("missing upgrade headers")
@@ -147,21 +159,23 @@ func (g *Gateway) performUpgrade(w http.ResponseWriter, r *http.Request, identit
 		return fmt.Errorf("flush handshake: %w", err)
 	}
 
-	childLogger := g.logger.With().Str("document", documentID).Str("client", identity.ClientID).Logger()
+	childLogger := observability.LoggerWithTrace(ctx, g.logger).With().Str("document", documentID).Str("client", identity.ClientID).Logger()
 	var connection *Connection
-	connection = newConnection(conn, identity, documentID, g.registry, childLogger, connectionOptions{
+	connection = newConnection(ctx, conn, identity, documentID, g.registry, childLogger, connectionOptions{
 		heartbeatInterval:  g.cfg.HeartbeatInterval,
 		heartbeatTolerance: g.cfg.HeartbeatTolerance,
 		sendBufferSize:     g.cfg.SendBuffer,
 		writeTimeout:       g.cfg.WriteTimeout,
 	}, func() {
 		g.registry.Unregister(documentID, connection)
+		gatewaySendQueueDepth.DeleteLabelValues(documentID)
 		if g.hooks.OnDisconnect != nil {
 			g.hooks.OnDisconnect(connection)
 		}
 	})
 
 	g.registry.Register(documentID, connection)
+	gatewayConnections.WithLabelValues(documentID).Inc()
 	if g.hooks.OnConnect != nil {
 		if err := g.hooks.OnConnect(connection.Context(), connection); err != nil {
 			connection.Close()

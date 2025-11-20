@@ -21,8 +21,10 @@ type Config struct {
 	ObjectSecretKey  string
 	ObjectUseSSL     bool
 	HTTPListenAddr   string
+	MetricsAddr      string
 	ShutdownTimeout  time.Duration
 	HealthcheckProbe time.Duration
+	OTLPEndpoint     string
 }
 
 // Load reads configuration from the environment while applying sensible defaults
@@ -39,8 +41,10 @@ func Load() (Config, error) {
 		ObjectAccessKey:  getEnv("OBJECT_ACCESS_KEY", "minio"),
 		ObjectSecretKey:  getEnv("OBJECT_SECRET_KEY", "miniostorage"),
 		HTTPListenAddr:   getEnv("HTTP_LISTEN_ADDR", ":8080"),
+		MetricsAddr:      getEnv("METRICS_LISTEN_ADDR", ":9090"),
 		ShutdownTimeout:  getDuration("SHUTDOWN_TIMEOUT", 10*time.Second),
 		HealthcheckProbe: getDuration("HEALTHCHECK_INTERVAL", 30*time.Second),
+		OTLPEndpoint:     os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
 	}
 
 	redisDB := getInt("REDIS_DB", 0)
