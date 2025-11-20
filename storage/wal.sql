@@ -30,3 +30,16 @@ CREATE TABLE IF NOT EXISTS document_checkpoints (
     last_lsn BIGINT NOT NULL,
     checkpointed_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+CREATE TABLE IF NOT EXISTS document_snapshots (
+    id BIGSERIAL PRIMARY KEY,
+    document_id TEXT NOT NULL,
+    op_id TEXT NOT NULL,
+    vector_clock JSONB NOT NULL,
+    object_path TEXT NOT NULL,
+    last_lsn BIGINT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS document_snapshots_doc_created_idx
+    ON document_snapshots USING btree (document_id, created_at DESC);

@@ -126,6 +126,22 @@ func (s *CRDTStore) Snapshot(includeDeleted bool) []CharacterNode {
 	return result
 }
 
+// NodeCount returns the number of nodes in the CRDT. When includeDeleted is
+// false, tombstoned nodes are not included in the tally.
+func (s *CRDTStore) NodeCount(includeDeleted bool) int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	count := 0
+	for _, n := range s.nodes {
+		if !includeDeleted && n.IsDeleted {
+			continue
+		}
+		count++
+	}
+	return count
+}
+
 // ToText flattens the CRDT structure into a linear document string, skipping
 // deleted entries.
 func (s *CRDTStore) ToText() string {
@@ -159,6 +175,20 @@ func (s *CRDTStore) Iterator(skipDeleted bool) <-chan CharacterNode {
 		}
 	}()
 	return out
+}
+
+// Reset replaces the current CRDT contents with the provided nodes. Existing
+// listeners and identifier generator remain intact so that future operations
+// continue to function.
+func (s *CRDTStore) Reset(nodes []CharacterNode) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.nodes = make([]*CharacterNode, len(nodes))
+	for i := range nodes {
+		node := nodes[i]
+		s.nodes[i] = &node
+	}
 }
 
 func (s *CRDTStore) listenersSnapshot() []Listener {

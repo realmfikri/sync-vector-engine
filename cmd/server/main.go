@@ -3,15 +3,18 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"os/signal"
 	"syscall"
 	"time"
 
+	"github.com/minio/minio-go/v7"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 
 	"github.com/example/sync-vector-engine/internal/config"
 	"github.com/example/sync-vector-engine/internal/crdt"
+	"github.com/example/sync-vector-engine/internal/snapshot"
 	"github.com/example/sync-vector-engine/internal/storage"
 	"github.com/example/sync-vector-engine/internal/types"
 )
@@ -37,12 +40,14 @@ func main() {
 
 	wal := storage.NewWAL(resources.Postgres)
 	engine := crdt.NewEngine(cfg.AppName, logger)
+	snapshotWorker := snapshot.NewWorker(wal, engine, resources.Object, cfg.ObjectBucket, logger)
 
-	if err := replayWAL(ctx, wal, engine, logger); err != nil {
+	if err := replayWAL(ctx, wal, engine, resources.Object, cfg.ObjectBucket, logger); err != nil {
 		logger.Fatal().Err(err).Msg("failed to replay WAL")
 	}
 
 	go checkpointLoop(ctx, wal, engine, logger, cfg.HealthcheckProbe)
+	snapshotWorker.Start(ctx)
 
 	logger.Info().Msg("server dependencies initialized")
 
@@ -83,7 +88,7 @@ func main() {
 	}
 }
 
-func replayWAL(ctx context.Context, wal *storage.WAL, engine *crdt.Engine, logger zerolog.Logger) error {
+func replayWAL(ctx context.Context, wal *storage.WAL, engine *crdt.Engine, object *minio.Client, bucket string, logger zerolog.Logger) error {
 	docs, err := wal.ActiveDocuments(ctx)
 	if err != nil {
 		return fmt.Errorf("list active wal documents: %w", err)
@@ -95,7 +100,15 @@ func replayWAL(ctx context.Context, wal *storage.WAL, engine *crdt.Engine, logge
 			return fmt.Errorf("read checkpoint for %s: %w", docID, err)
 		}
 
-		if err := wal.ReplayDocument(ctx, docID, checkpoint, func(record types.WALRecord) error {
+		startLSN := checkpoint
+		snapshotLSN, err := restoreFromSnapshot(ctx, wal, engine, object, bucket, docID, logger)
+		if err != nil {
+			logger.Error().Err(err).Str("document", string(docID)).Msg("failed to restore snapshot; continuing from checkpoint")
+		} else if snapshotLSN > startLSN {
+			startLSN = snapshotLSN
+		}
+
+		if err := wal.ReplayDocument(ctx, docID, startLSN, func(record types.WALRecord) error {
 			return engine.ApplyWAL(record)
 		}); err != nil {
 			return fmt.Errorf("replay document %s: %w", docID, err)
@@ -109,6 +122,44 @@ func replayWAL(ctx context.Context, wal *storage.WAL, engine *crdt.Engine, logge
 	}
 
 	return nil
+}
+
+func restoreFromSnapshot(ctx context.Context, wal *storage.WAL, engine *crdt.Engine, object *minio.Client, bucket string, docID types.DocumentID, logger zerolog.Logger) (int64, error) {
+	if object == nil {
+		return 0, nil
+	}
+
+	ref, err := wal.LatestSnapshot(ctx, docID)
+	if err != nil {
+		return 0, fmt.Errorf("lookup snapshot: %w", err)
+	}
+	if ref.OperationID == "" || ref.ObjectPath == "" {
+		return 0, nil
+	}
+
+	obj, err := object.GetObject(ctx, bucket, ref.ObjectPath, minio.GetObjectOptions{})
+	if err != nil {
+		return 0, fmt.Errorf("get snapshot object: %w", err)
+	}
+	defer obj.Close()
+
+	data, err := io.ReadAll(obj)
+	if err != nil {
+		return 0, fmt.Errorf("read snapshot object: %w", err)
+	}
+
+	payload, err := snapshot.DecodePayload(data)
+	if err != nil {
+		return 0, fmt.Errorf("decode snapshot: %w", err)
+	}
+	if payload.Document != "" && payload.Document != docID {
+		logger.Warn().Str("document", string(docID)).Str("snapshot_doc", string(payload.Document)).Msg("snapshot document mismatch")
+	}
+
+	engine.Restore(docID, payload.Nodes, payload.VectorClock.Clone(), payload.LastOpID, ref.LastLSN)
+	logger.Info().Str("document", string(docID)).Str("op_id", string(ref.OperationID)).Msg("restored snapshot")
+
+	return ref.LastLSN, nil
 }
 
 func checkpointLoop(ctx context.Context, wal *storage.WAL, engine *crdt.Engine, logger zerolog.Logger, interval time.Duration) {

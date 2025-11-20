@@ -15,6 +15,7 @@ type Engine struct {
 	siteID  string
 	stores  map[types.DocumentID]*CRDTStore
 	clocks  map[types.DocumentID]types.VectorClock
+	lastOps map[types.DocumentID]types.OperationID
 	lastLSN map[types.DocumentID]int64
 	logger  zerolog.Logger
 }
@@ -25,6 +26,7 @@ func NewEngine(siteID string, logger zerolog.Logger) *Engine {
 		siteID:  siteID,
 		stores:  make(map[types.DocumentID]*CRDTStore),
 		clocks:  make(map[types.DocumentID]types.VectorClock),
+		lastOps: make(map[types.DocumentID]types.OperationID),
 		lastLSN: make(map[types.DocumentID]int64),
 		logger:  logger,
 	}
@@ -55,6 +57,7 @@ func (e *Engine) ApplyWAL(record types.WALRecord) error {
 	}
 	clock.Merge(record.VectorClock)
 	e.clocks[record.Document] = clock
+	e.lastOps[record.Document] = record.Operation
 	e.lastLSN[record.Document] = record.LSN
 	e.mu.Unlock()
 
@@ -99,6 +102,29 @@ func (e *Engine) LastLSN(docID types.DocumentID) int64 {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	return e.lastLSN[docID]
+}
+
+// LastOperation returns the most recent operation identifier observed for the document.
+func (e *Engine) LastOperation(docID types.DocumentID) types.OperationID {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.lastOps[docID]
+}
+
+// Restore replaces a document's in-memory CRDT state and associated metadata
+// using the provided snapshot values.
+func (e *Engine) Restore(docID types.DocumentID, nodes []CharacterNode, clock types.VectorClock, lastOp types.OperationID, lastLSN int64) {
+	store := e.Store(docID)
+	store.Reset(nodes)
+
+	e.mu.Lock()
+	if clock == nil {
+		clock = make(types.VectorClock)
+	}
+	e.clocks[docID] = clock
+	e.lastOps[docID] = lastOp
+	e.lastLSN[docID] = lastLSN
+	e.mu.Unlock()
 }
 
 // Documents returns the list of documents currently loaded in memory.
