@@ -267,6 +267,47 @@ func (w *WAL) LatestSnapshot(ctx context.Context, docID types.DocumentID) (Snaps
 	}, nil
 }
 
+// SnapshotBeforeLSN returns the newest snapshot that does not surpass the provided WAL position.
+func (w *WAL) SnapshotBeforeLSN(ctx context.Context, docID types.DocumentID, lsn int64) (SnapshotRef, error) {
+	var (
+		opID       string
+		vectorData []byte
+		objectPath string
+		lastLSN    int64
+		createdAt  time.Time
+	)
+
+	err := w.pool.QueryRow(ctx, `
+                SELECT op_id, vector_clock, object_path, last_lsn, created_at
+                FROM document_snapshots
+                WHERE document_id = $1 AND last_lsn <= $2
+                ORDER BY last_lsn DESC
+                LIMIT 1
+        `, docID, lsn).Scan(&opID, &vectorData, &objectPath, &lastLSN, &createdAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return SnapshotRef{}, nil
+	}
+	if err != nil {
+		return SnapshotRef{}, err
+	}
+
+	var clock types.VectorClock
+	if len(vectorData) > 0 {
+		if err := json.Unmarshal(vectorData, &clock); err != nil {
+			return SnapshotRef{}, fmt.Errorf("decode vector clock: %w", err)
+		}
+	}
+
+	return SnapshotRef{
+		Document:    docID,
+		OperationID: types.OperationID(opID),
+		VectorClock: clock,
+		ObjectPath:  objectPath,
+		LastLSN:     lastLSN,
+		CreatedAt:   createdAt,
+	}, nil
+}
+
 // OperationCountAfterLSN returns how many operations exist beyond the provided
 // WAL position for a document.
 func (w *WAL) OperationCountAfterLSN(ctx context.Context, docID types.DocumentID, lsn int64) (int64, error) {
@@ -277,6 +318,39 @@ func (w *WAL) OperationCountAfterLSN(ctx context.Context, docID types.DocumentID
                 WHERE document_id = $1 AND lsn > $2
         `, docID, lsn).Scan(&count)
 	return count, err
+}
+
+// LSNForOperation returns the WAL position for a specific operation identifier.
+func (w *WAL) LSNForOperation(ctx context.Context, docID types.DocumentID, opID types.OperationID) (int64, time.Time, error) {
+	var lsn int64
+	var createdAt time.Time
+	err := w.pool.QueryRow(ctx, `
+                SELECT lsn, created_at
+                FROM document_operations
+                WHERE document_id = $1 AND op_id = $2
+                ORDER BY lsn DESC
+                LIMIT 1
+        `, docID, opID).Scan(&lsn, &createdAt)
+	if err != nil {
+		return 0, time.Time{}, err
+	}
+	return lsn, createdAt, nil
+}
+
+// LSNForTime returns the most recent WAL position at or before the provided time.
+func (w *WAL) LSNForTime(ctx context.Context, docID types.DocumentID, ts time.Time) (int64, error) {
+	var lsn int64
+	err := w.pool.QueryRow(ctx, `
+                SELECT lsn
+                FROM document_operations
+                WHERE document_id = $1 AND created_at <= $2
+                ORDER BY lsn DESC
+                LIMIT 1
+        `, docID, ts).Scan(&lsn)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, nil
+	}
+	return lsn, err
 }
 
 func (w *WAL) retry(ctx context.Context, fn func(context.Context) error) error {
