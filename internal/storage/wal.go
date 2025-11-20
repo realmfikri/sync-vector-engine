@@ -96,6 +96,13 @@ RETURNING lsn`,
 	return lsn, nil
 }
 
+// AppendCRDTOperation converts a logical operation into a WAL record and
+// persists it, ensuring the vector clock is encoded alongside the payload.
+func (w *WAL) AppendCRDTOperation(ctx context.Context, op types.Operation) (int64, error) {
+	record := op.ToWALRecord()
+	return w.AppendOperation(ctx, record.Document, record)
+}
+
 // ActiveDocuments returns the set of documents that currently have WAL entries.
 func (w *WAL) ActiveDocuments(ctx context.Context) ([]types.DocumentID, error) {
 	rows, err := w.pool.Query(ctx, `SELECT DISTINCT document_id FROM document_operations`)
